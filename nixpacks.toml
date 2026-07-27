@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["python310", "google-chrome", "chromedriver"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "gunicorn --bind 0.0.0.0:$PORT --timeout 300 app:app"
+
+[build]
+# Don't use mise for Python
+pythonVersion = "3.10"
