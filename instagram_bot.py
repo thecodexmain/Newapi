@@ -9,6 +9,7 @@ import json
 import logging
 import gc
 import shutil
+import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -16,6 +17,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 logger = logging.getLogger(__name__)
 
@@ -32,70 +35,50 @@ class InstagramBot:
         self.driver = None
         self.headless = headless
         self.temp_dir = None
+        self.username = None
         self._setup_driver()
     
     def _setup_driver(self):
-        """Setup Chrome driver with temporary profile for auto-cleanup"""
+        """Setup Chrome driver with temporary profile"""
         try:
-            # Create temporary directory for Chrome profile
             import tempfile
             self.temp_dir = tempfile.mkdtemp(prefix='chrome_profile_')
             logger.info(f"Created temporary Chrome profile: {self.temp_dir}")
             
             options = Options()
-            
-            # Use temporary profile
             options.add_argument(f'--user-data-dir={self.temp_dir}')
-            
-            # Essential options for Railway
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-setuid-sandbox')
-            
-            # Clear all cookies and cache on exit
             options.add_argument('--clear-cache')
             options.add_argument('--clear-cookies')
-            options.add_argument('--clear-quota-cache')
-            options.add_argument('--clear-plugin-data')
             
-            # Additional stability options
-            options.add_argument('--disable-software-rasterizer')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-plugins')
-            options.add_argument('--disable-background-timer-throttling')
-            options.add_argument('--disable-backgrounding-occluded-windows')
-            options.add_argument('--disable-renderer-backgrounding')
-            
-            # Headless mode
             if self.headless:
                 options.add_argument('--headless=new')
                 options.add_argument('--window-size=1920,1080')
             
-            # Anti-detection
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
             
-            # Disable notifications
             prefs = {
                 "profile.default_content_setting_values.notifications": 2,
                 "profile.default_content_setting_values.images": 2,
                 "profile.managed_default_content_settings.images": 2,
-                "profile.default_content_settings.cookies": 2,  # Don't save cookies
-                "profile.cookie_controls_mode": 2,  # Block third-party cookies
-                "privacy_sandbox.m1.enabled": False  # Disable privacy sandbox
+                "profile.default_content_settings.cookies": 2,
+                "profile.cookie_controls_mode": 2,
+                "credentials_enable_service": False,
+                "profile.password_manager_enabled": False
             }
             options.add_experimental_option("prefs", prefs)
             
-            # Use Chromium for Railway
             chromium_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
             for path in chromium_paths:
                 if os.path.exists(path):
                     options.binary_location = path
                     break
             
-            # ChromeDriver path
             chromedriver_paths = ['/usr/bin/chromedriver', '/usr/local/bin/chromedriver']
             service = None
             for path in chromedriver_paths:
@@ -103,24 +86,19 @@ class InstagramBot:
                     service = Service(path)
                     break
             
-            # More memory for Pro
-            options.add_argument('--max_old_space_size=512')
-            
             if service:
                 self.driver = webdriver.Chrome(service=service, options=options)
             else:
                 self.driver = webdriver.Chrome(options=options)
             
-            # Set timeouts
             self.driver.set_page_load_timeout(60)
             self.driver.set_script_timeout(60)
             
-            # Hide webdriver
             self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
                 'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
             })
             
-            logger.info("ChromeDriver initialized successfully with auto-cleanup")
+            logger.info("ChromeDriver initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize Chrome Driver: {e}")
@@ -128,30 +106,134 @@ class InstagramBot:
             raise
     
     def _cleanup_temp_dir(self):
-        """Clean up temporary Chrome profile directory"""
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir)
-                logger.info(f"Cleaned up temporary Chrome profile: {self.temp_dir}")
+                logger.info(f"Cleaned up temp directory: {self.temp_dir}")
             except Exception as e:
                 logger.warning(f"Could not cleanup temp dir: {e}")
             finally:
                 self.temp_dir = None
     
+    def get_username(self):
+        """Get the extracted username"""
+        return self.username
+    
+    def _sanitize_cookie(self, cookie):
+        """Sanitize cookie - exactly like 099.py"""
+        valid_cookie = {}
+        if "name" in cookie:
+            valid_cookie["name"] = str(cookie["name"])
+        if "value" in cookie:
+            valid_cookie["value"] = str(cookie["value"])
+        
+        domain = str(cookie.get("domain", ".instagram.com"))
+        valid_cookie["domain"] = domain if domain.startswith(".") else f".{domain}"
+        valid_cookie["path"] = str(cookie.get("path", "/"))
+        
+        if "secure" in cookie and isinstance(cookie["secure"], bool):
+            valid_cookie["secure"] = cookie["secure"]
+        if "httpOnly" in cookie and isinstance(cookie["httpOnly"], bool):
+            valid_cookie["httpOnly"] = cookie["httpOnly"]
+        
+        return valid_cookie
+    
+    def _js_click(self, elem, name):
+        """JavaScript click with scrolling"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", elem)
+            time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", elem)
+            logger.info(f"    ✅ Clicked: {name}")
+            return True
+        except:
+            logger.warning(f"    ❌ Failed: {name}")
+            return False
+    
+    def _click_button(self, texts, label):
+        """Find and click button by text - exactly like your script"""
+        for txt in texts:
+            selectors = [
+                f"//button[text()='{txt}']",
+                f"//button[contains(text(), '{txt}')]",
+                f"//div[@role='button'][contains(., '{txt}')]",
+                f"//span[contains(text(), '{txt}')]",
+                f"//div[contains(text(), '{txt}')]",
+                f"//*[@role='button'][contains(., '{txt}')]",
+                f"//*[@aria-label='{txt}']",
+            ]
+            for sel in selectors:
+                try:
+                    elems = self.driver.find_elements(By.XPATH, sel)
+                    for elem in elems:
+                        if elem.is_displayed():
+                            txt_found = elem.text.strip()[:50]
+                            logger.info(f"    🎯 [{label}] Found: '{txt_found}'")
+                            if self._js_click(elem, label):
+                                time.sleep(2)
+                                return True
+                except:
+                    continue
+        return False
+    
+    def _close_popup(self):
+        """Close any popup - exactly like your script"""
+        for sel in [
+            "//*[@aria-label='Close']", 
+            "//*[@aria-label='close']", 
+            "//div[@role='button'][.//*[local-name()='svg']]", 
+            "//button[contains(text(), 'Not Now')]", 
+            "//button[contains(text(), 'Skip')]"
+        ]:
+            try:
+                for elem in self.driver.find_elements(By.XPATH, sel):
+                    if elem.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", elem)
+                        time.sleep(0.5)
+                        return True
+            except:
+                pass
+        try:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.3)
+        except:
+            pass
+        return False
+    
+    def _find_and_click_boost(self):
+        """Find Boost button with scrolling - exactly like your script"""
+        logger.info("  🔍 Scanning for Boost button...")
+        for i in range(5):
+            self.driver.execute_script(f"window.scrollBy(0, {400 + i*200});")
+            time.sleep(1)
+        return self._click_button(['Boost', 'Boost post', 'Boost Post'], 'BOOST')
+    
+    def _navigate_to_posts_page(self):
+        """Go to Instagram posts page - exactly like your script"""
+        urls = [
+            "https://business.facebook.com/latest/instagram_account/instagram_posts",
+            "https://business.facebook.com/latest/instagram_account",
+            "https://business.facebook.com/latest/home",
+        ]
+        for url in urls:
+            self.driver.get(url)
+            time.sleep(5)
+            if 'login' not in self.driver.current_url.lower():
+                return True
+        return False
+    
     def perform_cookie_login(self, cookies):
-        """Perform cookie login with auto-cleanup"""
+        """Perform cookie login - exactly like your script"""
         try:
             logger.info("Attempting cookie-based login...")
-            
-            # Clear any existing cookies
-            self.driver.delete_all_cookies()
             
             # Navigate to Instagram
             logger.info("Navigating to Instagram...")
             self.driver.get("https://www.instagram.com")
-            time.sleep(3)
+            time.sleep(4)
             
-            # Inject cookies (temporary, not saved)
+            # Clear and inject cookies
+            self.driver.delete_all_cookies()
             logger.info(f"Injecting {len(cookies)} cookies...")
             injected_count = 0
             for cookie in cookies:
@@ -174,82 +256,100 @@ class InstagramBot:
             
             # Verify login
             current_url = self.driver.current_url.lower()
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+            
+            nav_elements = self.driver.find_elements(By.XPATH, 
+                "//a[contains(@href, 'direct/inbox') or contains(@href, 'explore') or @aria-label='Home']")
             
             is_logged_in = False
-            if "login" not in current_url:
+            if any(kw in current_url for kw in ["accounts/onetap", "instagram.com/direct", "instagram.com/explore"]) or len(nav_elements) > 0:
                 is_logged_in = True
-                logger.info("STATUS: SUCCESS ✅ - Authenticated via cookies!")
+            elif "login" not in current_url and "phone number, username, or email" not in body_text:
+                is_logged_in = True
+            
+            # Extract username
+            if is_logged_in:
+                try:
+                    profile_links = self.driver.find_elements(By.XPATH, "//a[contains(@href, '/') and contains(@href, '_')]")
+                    for link in profile_links:
+                        href = link.get_attribute('href')
+                        if '/accounts/' not in href and '/p/' not in href and '/explore/' not in href:
+                            username = href.split('/')[-1] if href.endswith('/') else href.split('/')[-1]
+                            if username and len(username) > 3:
+                                self.username = username
+                                logger.info(f"Extracted username: {self.username}")
+                                break
+                    
+                    if not self.username:
+                        body_text = self.driver.find_element(By.TAG_NAME, "body").text
+                        username_match = re.search(r'@([a-zA-Z0-9_.]+)', body_text)
+                        if username_match:
+                            self.username = username_match.group(1)
+                            logger.info(f"Extracted username from text: {self.username}")
+                except Exception as e:
+                    logger.warning(f"Could not extract username: {e}")
+                    self.username = "Unknown"
+
+            if is_logged_in:
+                logger.info(f"STATUS: SUCCESS ✅ - Authenticated via cookies! (Username: {self.username})")
+                return True
             else:
                 logger.error("STATUS: FAILED ❌ - Cookie expired or invalid.")
-            
-            return is_logged_in
+                return False
                 
         except Exception as e:
             logger.error(f"Error during cookie login: {e}")
             return False
     
-    def connect_to_business_suite(self):
-        """Connect to Facebook Business Suite"""
-        try:
-            logger.info("Navigating to Facebook Business login page...")
-            self.driver.get(FB_LOGIN_URL)
-            time.sleep(3)
-            
-            self._handle_cookies()
-            
-            logger.info("Looking for the 'Continue with Instagram' button...")
-            time.sleep(3)
-            
-            # Check for redirect
-            current_url = self.driver.current_url.lower()
-            if "facebook.com/login" in current_url:
-                logger.warning("Redirected to Facebook Login page!")
-            
-            # Find and click 'Continue with Instagram'
-            ig_btn = self._find_continue_with_instagram_button()
-            
-            if ig_btn:
-                logger.info("Clicking 'Continue with Instagram' button...")
-                try:
-                    ig_btn.click()
-                except:
-                    self.driver.execute_script("arguments[0].click();", ig_btn)
-                
-                # Handle popup and professional setup
-                self._handle_popup_and_professional_setup()
-                
-                # Handle post-login landing page
-                self._handle_post_login_landing()
-                
-                # Ad Account Connection
-                self._handle_ad_account_connection()
-                
-                return True
-            
-            logger.error("Could not find 'Continue with Instagram' button")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error connecting to Business Suite: {e}")
-            return False
+    def _handle_continue_screen(self):
+        """Handle continue screen - exactly like 099.py"""
+        logger.info("Checking for 'Continue' button on One Tap screen...")
+        
+        continue_selectors = [
+            "//button[contains(text(), 'Continue')]",
+            "//button[contains(., 'Continue')]",
+            "//a[contains(text(), 'Continue')]",
+            "//div[@role='button' and contains(., 'Continue')]",
+            "//button[type='button' and contains(., 'Continue')]"
+        ]
+        
+        for selector in continue_selectors:
+            try:
+                elements = self.driver.find_elements(By.XPATH, selector)
+                for el in elements:
+                    if el.is_displayed():
+                        logger.info(f"Found 'Continue' button with text: '{el.text.strip()}'. Clicking...")
+                        try:
+                            el.click()
+                        except:
+                            self.driver.execute_script("arguments[0].click();", el)
+                        time.sleep(5)
+                        return True
+            except:
+                continue
+        
+        logger.info("No active 'Continue' button detected.")
+        return False
     
-    def navigate_to_ad_picker(self, asset_id, business_id=None):
-        """Navigate to ad picker"""
+    def _handle_cookies(self):
+        """Handle cookies - exactly like 099.py"""
         try:
-            target_url = f"https://business.facebook.com/latest/boosted_item_picker/?asset_id={asset_id}"
-            if business_id:
-                target_url += f"&business_id={business_id}"
-            target_url += "&ir_qe_exposed=1&content_filter=All&entry_point=bizweb_home_header&nav_ref=internal_nav&selected_item=boosted_instagram_media_picker"
-            
-            logger.info(f"Navigating to ad booster page...")
-            self.driver.get(target_url)
-            time.sleep(5)
-            
-            return self.driver.current_url
-            
-        except Exception as e:
-            logger.error(f"Error navigating to ad picker: {e}")
-            return None
+            cookie_texts = [
+                "Allow all cookies", "Allow essential and optional cookies",
+                "Decline optional cookies", "Accept All", "Accept", "Allow", "Agree",
+                "Allow essential", "Accept cookies"
+            ]
+            for text in cookie_texts:
+                btns = self.driver.find_elements(By.XPATH, 
+                    f"//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')]")
+                for btn in btns:
+                    if btn.is_displayed():
+                        btn.click()
+                        logger.info(f"Clicked cookie/consent dialog button: '{text}'")
+                        time.sleep(2)
+                        return
+        except:
+            pass
     
     def _find_continue_with_instagram_button(self):
         """Find 'Continue with Instagram' button"""
@@ -270,502 +370,181 @@ class InstagramBot:
                         continue
                     if el.is_displayed():
                         return el
-            except Exception:
+            except:
                 continue
         
         return None
     
-    def _handle_popup_and_professional_setup(self):
-        """Handle popup and professional setup"""
+    def connect_to_business_suite(self):
+        """Connect to Business Suite - exactly like your boost script flow"""
         try:
-            main_window = self.driver.current_window_handle
-            popup_window = None
+            # ═══════════════ STEP 1: FB BUSINESS AUTH ═══════════════
+            logger.info("Navigating to Facebook Business login page...")
+            fb_url = "https://business.facebook.com/business/loginpage/?next=https%3A%2F%2Fbusiness.facebook.com%2Flatest%2Fhome&login_options%5B0%5D=IG"
+            self.driver.get(fb_url)
+            time.sleep(5)
+            self._handle_cookies()
             
-            # Wait for popup
-            start_wait = time.time()
-            while time.time() - start_wait < 5:
-                if len(self.driver.window_handles) > 1:
-                    for handle in self.driver.window_handles:
-                        if handle != main_window:
-                            popup_window = handle
-                            self.driver.switch_to.window(popup_window)
-                            logger.info("Switched to Instagram authorization popup.")
-                            break
+            existing_handles = set(self.driver.window_handles)
+            logger.info("Looking for 'Continue with Instagram' button...")
+            
+            if not self._click_button(['Continue with Instagram', 'Instagram'], 'Continue with Instagram'):
+                logger.error("✗ Button not found!")
+                return False
+            
+            # ═══════════════ STEP 2: OATH TAB ═══════════════
+            logger.info("⏳ Waiting for OAuth tab...")
+            new_handle = None
+            for i in range(20):
+                time.sleep(1)
+                diff = set(self.driver.window_handles) - existing_handles
+                if diff:
+                    new_handle = list(diff)[0]
+                    logger.info(f"🆕 OAuth tab opened! ({i+1}s)")
                     break
-                time.sleep(0.5)
             
-            if popup_window:
-                popup_start_time = time.time()
-                step_attempts = {}
-                
-                while time.time() - popup_start_time < 90:
-                    time.sleep(1)
-                    
-                    if len(self.driver.window_handles) == 1:
-                        logger.info("Popup window closed automatically.")
-                        break
-                    
-                    try:
-                        current_url = self.driver.current_url.lower()
-                    except:
-                        break
-                    
-                    # Check for professional conversion
-                    is_professional = any(kw in current_url for kw in ["convert", "professional"])
-                    is_conversion_screen = False
-                    try:
-                        is_conversion_screen = len(self.driver.find_elements(By.XPATH, 
-                            "//*[contains(text(), 'Which best describes you')] | "
-                            "//*[contains(text(), 'Best for public figures')] | "
-                            "//*[contains(text(), 'Select a category')] | "
-                            "//*[contains(text(), 'Switch to a professional')] | "
-                            "//*[contains(text(), 'is ready')]"
-                        )) > 0
-                    except:
-                        pass
-                    
-                    if is_professional or is_conversion_screen:
-                        # Detect and handle states
-                        active_state = None
-                        try:
-                            if self.driver.find_elements(By.XPATH, "//*[contains(text(), 'account is ready')]"):
-                                active_state = "Ready"
-                            elif self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Switch to a professional')]"):
-                                active_state = "SwitchConfirmation"
-                            elif self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Select a category')]"):
-                                active_state = "CategorySelection"
-                            elif self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Which best describes you')]"):
-                                active_state = "CreatorSelection"
-                        except:
-                            pass
-                        
-                        if active_state:
-                            step_attempts[active_state] = step_attempts.get(active_state, 0) + 1
-                            if step_attempts[active_state] > 3:
-                                logger.info(f"State {active_state} is stuck. Closing...")
-                                try:
-                                    self.driver.close()
-                                except:
-                                    pass
-                                break
-                        
-                        handled = self._handle_professional_conversion_step()
-                        if handled:
-                            continue
-                    
-                    # Check for login page
-                    if "accounts/login" in current_url:
-                        logger.info("Login page detected in popup.")
-                        self._handle_cookies()
-                        continue
-                    
-                    # Check for "Log in as" button
-                    login_as_btn = None
-                    try:
-                        login_as_elems = self.driver.find_elements(By.XPATH, 
-                            "//*[contains(text(), 'Log in as')]")
-                        for el in login_as_elems:
-                            if el.is_displayed() and "Log in as" in el.text:
-                                login_as_btn = el
-                                break
-                    except:
-                        pass
-                        
-                    if login_as_btn:
-                        logger.info(f"NON-PROFESSIONAL ACCOUNT DETECTED: {login_as_btn.text}")
-                        try:
-                            login_as_btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", login_as_btn)
-                        time.sleep(3)
-                        continue
-                    
-                    # Check for authorization button
-                    auth_btn = self._find_authorization_button()
-                    if auth_btn:
-                        logger.info(f"AUTHORIZATION: Clicking {auth_btn.text}")
-                        try:
-                            auth_btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", auth_btn)
-                        time.sleep(4)
-                        continue
-                    
-                    if len(self.driver.window_handles) == 1:
-                        logger.info("Popup closed automatically.")
-                        break
-                    
-                    time.sleep(1)
-                
-                # Switch back to main window
-                if popup_window:
-                    try:
-                        if main_window in self.driver.window_handles:
-                            self.driver.switch_to.window(main_window)
-                            logger.info("Switched back to main window.")
-                            self.driver.refresh()
-                            time.sleep(5)
-                    except Exception as win_err:
-                        logger.error(f"Failed to switch back: {win_err}")
-                        
-        except Exception as e:
-            logger.error(f"Error in popup handling: {e}")
-    
-    def _handle_professional_conversion_step(self):
-        """Handle professional conversion steps"""
-        # State 5: Ready screen
-        try:
-            ready_elems = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'account is ready')]")
-            if ready_elems:
-                done_btns = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Done')]")
-                for btn in done_btns:
-                    if btn.is_displayed():
-                        logger.info("Ready screen - Clicking Done...")
-                        try:
-                            btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
-                        try:
-                            self.driver.close()
-                        except:
-                            pass
-                        return True
-        except:
-            pass
-        
-        # State 4: Switch confirmation
-        try:
-            switch_elems = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Switch to a professional')]")
-            if switch_elems:
-                continue_btns = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Continue')]")
-                for btn in continue_btns:
-                    if btn.is_displayed():
-                        logger.info("Switch confirmation - Clicking Continue...")
-                        try:
-                            btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
-                        return True
-        except:
-            pass
-        
-        # State 3: Category selection
-        try:
-            cat_elems = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Select a category')]")
-            if cat_elems:
-                logger.info("Category selection - Selecting Art...")
-                art_opt = self.driver.find_elements(By.XPATH, "//*[text()='Art']")
-                for el in art_opt:
-                    if el.is_displayed():
-                        try:
-                            el.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", el)
-                        break
-                
-                done_btns = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Done')]")
-                for btn in done_btns:
-                    if btn.is_displayed():
-                        try:
-                            btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
-                        return True
-        except:
-            pass
-        
-        # State 1: Creator selection
-        try:
-            desc_elems = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Which best describes you')]")
-            if desc_elems:
-                creator_opt = self.driver.find_elements(By.XPATH, "//*[text()='Creator']")
-                for el in creator_opt:
-                    if el.is_displayed():
-                        logger.info("Creator selection - Selecting Creator...")
-                        try:
-                            el.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", el)
-                        time.sleep(1)
-                        break
-                
-                next_btns = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Next')]")
-                for btn in next_btns:
-                    if btn.is_displayed():
-                        try:
-                            btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
-                        return True
-        except:
-            pass
-        
-        return False
-    
-    def _handle_post_login_landing(self):
-        """Handle post-login landing page"""
-        logger.info("Post-Login Landing Page Controller")
-        controller_start = time.time()
-        
-        while time.time() - controller_start < 60:
-            time.sleep(2)
+            if not new_handle:
+                logger.error("✗ OAuth tab not opened!")
+                return False
             
-            try:
-                if len(self.driver.window_handles) == 0:
-                    break
-            except:
-                pass
+            # ═══════════════ STEP 3: AUTHORIZE ═══════════════
+            self.driver.switch_to.window(new_handle)
+            time.sleep(5)
+            logger.info("🔍 Clicking 'Continue as' / 'Log in as'...")
             
-            try:
-                current_url = self.driver.current_url.lower()
-            except:
-                continue
-            
-            # Check for ad picker
-            if "/latest/" in current_url and "asset_id=" in current_url:
-                logger.info("Already on boosted post picker page.")
-                return True
-            
-            # Check for "Create ad" button
-            create_ad_btn = self._find_create_ad_button()
-            if create_ad_btn:
-                logger.info("Found Create ad button - clicking...")
-                try:
-                    create_ad_btn.click()
-                except:
-                    self.driver.execute_script("arguments[0].click();", create_ad_btn)
-                time.sleep(5)
-                return True
-            
-            # Check for continue buttons
-            continue_btn = self._find_continue_button()
-            if continue_btn:
-                logger.info("Found Continue button - clicking...")
-                try:
-                    continue_btn.click()
-                except:
-                    self.driver.execute_script("arguments[0].click();", continue_btn)
+            if not self._click_button(['Continue as', 'Log in as', 'Allow', 'Authorize'], 'Auth'):
+                ActionChains(self.driver).send_keys(Keys.ENTER).perform()
                 time.sleep(3)
-                continue
-        
-        return False
-    
-    def _handle_ad_account_connection(self):
-        """Handle ad account connection"""
-        main_window = self.driver.current_window_handle
-        
-        for attempt in range(1, 3):
-            logger.info(f"Ad Account Connection: Attempt {attempt}")
+                logger.info("⌨️ ENTER pressed")
             
-            # Find Continue button
-            continue_btn = self._find_continue_button()
-            if continue_btn:
-                logger.info(f"Clicking Continue...")
-                try:
-                    continue_btn.click()
-                except:
-                    self.driver.execute_script("arguments[0].click();", continue_btn)
-                time.sleep(5)
+            time.sleep(8)
             
-            # Handle Continue as button
-            self._handle_continue_as_button(main_window)
+            # ═══════════════ STEP 4: FIND DASHBOARD ═══════════════
+            for handle in self.driver.window_handles:
+                self.driver.switch_to.window(handle)
+                time.sleep(1)
+                if 'business.facebook.com' in self.driver.current_url and 'login' not in self.driver.current_url.lower():
+                    logger.info("🏠 Dashboard found!")
+                    break
             
-            # Refresh
-            try:
-                self.driver.refresh()
-                time.sleep(8)
-            except:
-                pass
-    
-    def _handle_continue_as_button(self, main_window):
-        """Handle Continue as button"""
-        try:
-            # Check for popup
-            popup_window = None
-            start_wait = time.time()
-            while time.time() - start_wait < 10:
-                try:
-                    if len(self.driver.window_handles) > 1:
-                        for handle in self.driver.window_handles:
-                            if handle != main_window:
-                                popup_window = handle
-                                self.driver.switch_to.window(popup_window)
-                                break
-                        break
-                except:
-                    pass
+            # Close popups
+            for _ in range(5):
+                self._close_popup()
                 time.sleep(0.5)
             
-            if popup_window:
-                time.sleep(5)
+            logger.info("✓ Authorization complete!")
+            
+            # ═══════════════ STEP 5: 1st BOOST CLICK ═══════════════
+            logger.info("▶ 1st Boost - Finding & Clicking...")
+            if not self._navigate_to_posts_page():
+                logger.error("✗ Cannot access posts page!")
+                return False
+            
+            if not self._find_and_click_boost():
+                logger.error("✗ Boost button not found!")
+                return False
+            logger.info("✓ 1st Boost clicked!")
+            
+            # ═══════════════ STEP 6: CONTINUE POPUP ═══════════════
+            logger.info("▶ Clicking 'Continue' on popup...")
+            time.sleep(3)
+            if not self._click_button(['Continue', 'Next', 'Submit'], 'Continue Popup'):
+                ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+                time.sleep(2)
+                logger.info("⌨️ ENTER pressed")
+            time.sleep(3)
+            logger.info("✓ Continue clicked!")
+            
+            # ═══════════════ STEP 7: CONTINUE AS USER (NEW TAB) ═══════════════
+            logger.info("▶ Handling 'Continue as User'...")
+            all_tabs = self.driver.window_handles
+            if len(all_tabs) > 1:
+                self.driver.switch_to.window(all_tabs[-1])
+                time.sleep(4)
+                logger.info("🔄 Switched to new tab")
+                logger.info(f"📄 Page: {self.driver.title[:60]}")
                 
-                # Find Continue as button
-                continue_as_btn = None
-                selectors = [
-                    "//button[contains(text(), 'Continue as')]",
-                    "//*[contains(text(), 'Continue as')]"
-                ]
-                for sel in selectors:
-                    try:
+                if not self._click_button(['Continue as', 'Continue', 'Log in as', 'OK'], 'Continue as User'):
+                    ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+                    time.sleep(2)
+                    logger.info("⌨️ ENTER pressed")
+                
+                time.sleep(4)
+                # Close this tab and go back to main
+                if len(self.driver.window_handles) > 1:
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+                    time.sleep(2)
+                    logger.info("🔙 Returned to main tab")
+            
+            logger.info("✓ Continue as User done!")
+            
+            # ═══════════════ STEP 8: 2nd BOOST → CONTINUE → OK ═══════════════
+            logger.info("▶ 2nd Boost - Find Boost → Continue → OK...")
+            
+            # 8A: Go to posts page & find Boost again
+            if not self._navigate_to_posts_page():
+                logger.error("✗ Cannot access posts page!")
+                return False
+            
+            logger.info("🔍 Looking for 2nd Boost button...")
+            if not self._find_and_click_boost():
+                logger.error("✗ 2nd Boost button not found!")
+                return False
+            logger.info("✓ 2nd Boost clicked!")
+            
+            # 8B: Click Continue on popup
+            logger.info("💬 Waiting for Continue popup...")
+            time.sleep(3)
+            if not self._click_button(['Continue', 'Next', 'Submit'], 'Continue 2nd'):
+                ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+                time.sleep(2)
+            time.sleep(3)
+            logger.info("✓ Continue clicked!")
+            
+            # 8C: Click OK button
+            logger.info("🔵 Looking for OK button...")
+            time.sleep(2)
+            # Close any popups first
+            for _ in range(3):
+                self._close_popup()
+                time.sleep(0.5)
+            
+            if self._click_button(['OK', 'Ok', 'Confirm', 'Done', 'Submit', 'Publish', 'Continue'], 'OK BUTTON'):
+                logger.info("✅ OK BUTTON CLICKED!")
+            else:
+                # Try blue button
+                logger.info("🔍 Trying blue button...")
+                try:
+                    for sel in ["//button[contains(@class, 'primary')]", "//button[@type='submit']", "//div[@role='dialog']//button"]:
                         elems = self.driver.find_elements(By.XPATH, sel)
-                        for el in elems:
-                            if el.is_displayed():
-                                continue_as_btn = el
+                        for elem in elems:
+                            if elem.is_displayed():
+                                self._js_click(elem, 'OK (blue)')
+                                time.sleep(2)
                                 break
-                        if continue_as_btn:
-                            break
-                    except:
-                        continue
-                
-                if continue_as_btn:
-                    logger.info(f"Clicking {continue_as_btn.text}")
-                    try:
-                        continue_as_btn.click()
-                    except:
-                        self.driver.execute_script("arguments[0].click();", continue_as_btn)
-                    time.sleep(8)
-                
-                # Close popup
-                try:
-                    if popup_window in self.driver.window_handles:
-                        self.driver.close()
                 except:
                     pass
-                
-                # Switch back
-                try:
-                    if main_window in self.driver.window_handles:
-                        self.driver.switch_to.window(main_window)
-                except:
-                    pass
-                    
+            
+            time.sleep(3)
+            
+            # ═══════════════ STEP 9: CLOSE POPUPS & FINISH ═══════════════
+            logger.info("▶ Final cleanup...")
+            for _ in range(5):
+                self._close_popup()
+                time.sleep(0.5)
+            
+            logger.info("🎉🎉🎉 TASK COMPLETE! OK DONE! 🎉🎉🎉")
+            
+            # Get the final URL for asset_id
+            final_url = self.driver.current_url
+            logger.info(f"Final URL: {final_url}")
+            
+            return True
+            
         except Exception as e:
-            logger.error(f"Error in continue as handler: {e}")
-    
-    def _sanitize_cookie(self, cookie):
-        """Sanitize cookie"""
-        valid_cookie = {}
-        if "name" in cookie:
-            valid_cookie["name"] = str(cookie["name"])
-        if "value" in cookie:
-            valid_cookie["value"] = str(cookie["value"])
-        
-        domain = str(cookie.get("domain", ".instagram.com"))
-        valid_cookie["domain"] = domain if domain.startswith(".") else f".{domain}"
-        valid_cookie["path"] = str(cookie.get("path", "/"))
-        
-        if "secure" in cookie and isinstance(cookie["secure"], bool):
-            valid_cookie["secure"] = cookie["secure"]
-        if "httpOnly" in cookie and isinstance(cookie["httpOnly"], bool):
-            valid_cookie["httpOnly"] = cookie["httpOnly"]
-        
-        return valid_cookie
-    
-    def _handle_continue_screen(self):
-        """Handle continue screen"""
-        logger.info("Checking for Continue button...")
-        
-        continue_selectors = [
-            "//button[contains(text(), 'Continue')]",
-            "//button[contains(., 'Continue')]",
-            "//a[contains(text(), 'Continue')]",
-            "//div[@role='button' and contains(., 'Continue')]"
-        ]
-        
-        for selector in continue_selectors:
-            try:
-                elements = self.driver.find_elements(By.XPATH, selector)
-                for el in elements:
-                    if el.is_displayed():
-                        logger.info(f"Clicking Continue: {el.text.strip()}")
-                        try:
-                            el.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", el)
-                        time.sleep(3)
-                        return True
-            except:
-                continue
-        
-        return False
-    
-    def _handle_cookies(self):
-        """Handle cookie consent"""
-        try:
-            cookie_texts = ["Accept All", "Accept", "Allow", "Agree"]
-            for text in cookie_texts:
-                btns = self.driver.find_elements(By.XPATH, f"//button[contains(text(), '{text}')]")
-                for btn in btns:
-                    if btn.is_displayed():
-                        btn.click()
-                        logger.info(f"Clicked cookie button: {text}")
-                        time.sleep(1)
-                        return
-        except:
-            pass
-    
-    def _find_continue_button(self):
-        """Find any Continue button"""
-        selectors = [
-            "//button[contains(text(), 'Continue')]",
-            "//a[contains(text(), 'Continue')]",
-            "//*[text()='Continue']"
-        ]
-        
-        for sel in selectors:
-            try:
-                elems = self.driver.find_elements(By.XPATH, sel)
-                for el in elems:
-                    if el.is_displayed():
-                        return el
-            except:
-                continue
-        
-        return None
-    
-    def _find_create_ad_button(self):
-        """Find Create ad button"""
-        selectors = [
-            "//button[contains(., 'Create ad')]",
-            "//*[contains(text(), 'Create ad')]",
-            "//span[contains(text(), 'Create ad')]"
-        ]
-        
-        for sel in selectors:
-            try:
-                elems = self.driver.find_elements(By.XPATH, sel)
-                for el in elems:
-                    if el.is_displayed():
-                        return el
-            except:
-                continue
-        
-        return None
-    
-    def _find_authorization_button(self):
-        """Find authorization button"""
-        try:
-            auth_selectors = [
-                "//button[text()='Allow']",
-                "//button[contains(text(), 'Authorize')]",
-                "//button[contains(text(), 'Confirm')]",
-                "//button[contains(text(), 'Continue')]"
-            ]
-            for selector in auth_selectors:
-                elems = self.driver.find_elements(By.XPATH, selector)
-                for el in elems:
-                    if el.is_displayed():
-                        text_lower = el.text.lower()
-                        if not any(word in text_lower for word in ["cancel", "decline", "not now", "back"]):
-                            return el
-        except:
-            pass
-        
-        return None
+            logger.error(f"Error connecting to Business Suite: {e}")
+            return False
     
     def get_current_url(self):
         """Get current URL"""
@@ -785,26 +564,18 @@ class InstagramBot:
         """Clean quit with full memory cleanup"""
         if self.driver:
             try:
-                # Clear all cookies before quitting
                 self.driver.delete_all_cookies()
-                
-                # Close all windows
                 for handle in self.driver.window_handles:
                     try:
                         self.driver.switch_to.window(handle)
                         self.driver.close()
                     except:
                         pass
-                
-                # Quit driver
                 self.driver.quit()
             except:
                 pass
             self.driver = None
         
-        # Clean up temporary profile directory
         self._cleanup_temp_dir()
-        
-        # Force garbage collection
         gc.collect()
         logger.info("Chrome driver cleaned up and memory freed")
