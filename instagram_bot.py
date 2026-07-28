@@ -761,3 +761,26 @@ class InstagramBot:
                 pass
             self.driver = None
             gc.collect()
+def get_current_url(self):
+    """Get current URL"""
+    try:
+        return self.driver.current_url if self.driver else None
+    except:
+        return None
+
+def get_page_title(self):
+    """Get page title"""
+    try:
+        return self.driver.title if self.driver else None
+    except:
+        return None
+
+def quit(self):
+    """Clean quit with memory cleanup"""
+    if self.driver:
+        try:
+            self.driver.quit()
+        except:
+            pass
+        self.driver = None
+        gc.collect()
