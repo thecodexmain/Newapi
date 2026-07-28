@@ -182,21 +182,21 @@ def status():
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    """Logout and cleanup"""
+    """Logout and cleanup with full memory free"""
     try:
         data = request.json
         session_id = data.get('session_id')
         
         if session_id and session_id in active_sessions:
             bot = active_sessions[session_id]['bot']
-            bot.quit()
+            bot.quit()  # This now clears everything
             del active_sessions[session_id]
-            logger.info(f"Session {session_id} logged out")
+            logger.info(f"Session {session_id} logged out and cleaned up")
             
             # Force garbage collection
             gc.collect()
         
-        return jsonify({'status': 'success', 'message': 'Logged out'})
+        return jsonify({'status': 'success', 'message': 'Logged out and cleaned up'})
         
     except Exception as e:
         logger.error(f"Logout error: {str(e)}")
