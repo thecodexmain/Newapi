@@ -120,7 +120,7 @@ class InstagramBot:
         return self.username
     
     def _sanitize_cookie(self, cookie):
-        """Sanitize cookie - exactly like 099.py"""
+        """Sanitize cookie"""
         valid_cookie = {}
         if "name" in cookie:
             valid_cookie["name"] = str(cookie["name"])
@@ -151,7 +151,7 @@ class InstagramBot:
             return False
     
     def _click_button(self, texts, label):
-        """Find and click button by text - exactly like your script"""
+        """Find and click button by text"""
         for txt in texts:
             selectors = [
                 f"//button[text()='{txt}']",
@@ -177,7 +177,7 @@ class InstagramBot:
         return False
     
     def _close_popup(self):
-        """Close any popup - exactly like your script"""
+        """Close any popup"""
         for sel in [
             "//*[@aria-label='Close']", 
             "//*[@aria-label='close']", 
@@ -201,7 +201,7 @@ class InstagramBot:
         return False
     
     def _find_and_click_boost(self):
-        """Find Boost button with scrolling - exactly like your script"""
+        """Find Boost button with scrolling"""
         logger.info("  🔍 Scanning for Boost button...")
         for i in range(5):
             self.driver.execute_script(f"window.scrollBy(0, {400 + i*200});")
@@ -209,7 +209,7 @@ class InstagramBot:
         return self._click_button(['Boost', 'Boost post', 'Boost Post'], 'BOOST')
     
     def _navigate_to_posts_page(self):
-        """Go to Instagram posts page - exactly like your script"""
+        """Go to Instagram posts page"""
         urls = [
             "https://business.facebook.com/latest/instagram_account/instagram_posts",
             "https://business.facebook.com/latest/instagram_account",
@@ -223,7 +223,7 @@ class InstagramBot:
         return False
     
     def perform_cookie_login(self, cookies):
-        """Perform cookie login - exactly like your script"""
+        """Perform cookie login with username extraction"""
         try:
             logger.info("Attempting cookie-based login...")
             
@@ -302,7 +302,7 @@ class InstagramBot:
             return False
     
     def _handle_continue_screen(self):
-        """Handle continue screen - exactly like 099.py"""
+        """Handle continue screen"""
         logger.info("Checking for 'Continue' button on One Tap screen...")
         
         continue_selectors = [
@@ -332,7 +332,7 @@ class InstagramBot:
         return False
     
     def _handle_cookies(self):
-        """Handle cookies - exactly like 099.py"""
+        """Handle cookies"""
         try:
             cookie_texts = [
                 "Allow all cookies", "Allow essential and optional cookies",
@@ -376,7 +376,7 @@ class InstagramBot:
         return None
     
     def connect_to_business_suite(self):
-        """Connect to Business Suite - exactly like your boost script flow"""
+        """Connect to Business Suite - full boost flow"""
         try:
             # ═══════════════ STEP 1: FB BUSINESS AUTH ═══════════════
             logger.info("Navigating to Facebook Business login page...")
@@ -545,6 +545,24 @@ class InstagramBot:
         except Exception as e:
             logger.error(f"Error connecting to Business Suite: {e}")
             return False
+    
+    def navigate_to_ad_picker(self, asset_id, business_id=None):
+        """Navigate to ad picker"""
+        try:
+            target_url = f"https://business.facebook.com/latest/boosted_item_picker/?asset_id={asset_id}"
+            if business_id:
+                target_url += f"&business_id={business_id}"
+            target_url += "&ir_qe_exposed=1&content_filter=All&entry_point=bizweb_home_header&nav_ref=internal_nav&selected_item=boosted_instagram_media_picker"
+            
+            logger.info(f"Navigating to ad booster page: {target_url}")
+            self.driver.get(target_url)
+            time.sleep(5)
+            
+            return self.driver.current_url
+            
+        except Exception as e:
+            logger.error(f"Error navigating to ad picker: {e}")
+            return None
     
     def get_current_url(self):
         """Get current URL"""
