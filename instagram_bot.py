@@ -8,6 +8,7 @@ import struct
 import json
 import logging
 import gc
+import shutil
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -30,30 +31,46 @@ class InstagramBot:
     def __init__(self, headless=True):
         self.driver = None
         self.headless = headless
+        self.temp_dir = None
         self._setup_driver()
     
     def _setup_driver(self):
-        """Setup Chrome driver with optimized settings for Railway"""
+        """Setup Chrome driver with temporary profile for auto-cleanup"""
         try:
+            # Create temporary directory for Chrome profile
+            import tempfile
+            self.temp_dir = tempfile.mkdtemp(prefix='chrome_profile_')
+            logger.info(f"Created temporary Chrome profile: {self.temp_dir}")
+            
             options = Options()
             
-            # Critical: Reduce memory usage
+            # Use temporary profile
+            options.add_argument(f'--user-data-dir={self.temp_dir}')
+            
+            # Essential options for Railway
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-setuid-sandbox')
             
-            # Additional memory optimization
+            # Clear all cookies and cache on exit
+            options.add_argument('--clear-cache')
+            options.add_argument('--clear-cookies')
+            options.add_argument('--clear-quota-cache')
+            options.add_argument('--clear-plugin-data')
+            
+            # Additional stability options
             options.add_argument('--disable-software-rasterizer')
             options.add_argument('--disable-extensions')
             options.add_argument('--disable-plugins')
-            options.add_argument('--disable-images')
-            options.add_argument('--disable-javascript')  # Only if not needed
+            options.add_argument('--disable-background-timer-throttling')
+            options.add_argument('--disable-backgrounding-occluded-windows')
+            options.add_argument('--disable-renderer-backgrounding')
             
             # Headless mode
             if self.headless:
                 options.add_argument('--headless=new')
-                options.add_argument('--window-size=1280,720')  # Smaller window
+                options.add_argument('--window-size=1920,1080')
             
             # Anti-detection
             options.add_argument("--disable-blink-features=AutomationControlled")
@@ -63,8 +80,11 @@ class InstagramBot:
             # Disable notifications
             prefs = {
                 "profile.default_content_setting_values.notifications": 2,
-                "profile.default_content_setting_values.images": 2,  # Block images
-                "profile.managed_default_content_settings.images": 2
+                "profile.default_content_setting_values.images": 2,
+                "profile.managed_default_content_settings.images": 2,
+                "profile.default_content_settings.cookies": 2,  # Don't save cookies
+                "profile.cookie_controls_mode": 2,  # Block third-party cookies
+                "privacy_sandbox.m1.enabled": False  # Disable privacy sandbox
             }
             options.add_experimental_option("prefs", prefs)
             
@@ -80,15 +100,11 @@ class InstagramBot:
             service = None
             for path in chromedriver_paths:
                 if os.path.exists(path):
-                    service = Service(
-                        path,
-                        service_args=['--verbose', '--log-path=chromedriver.log']
-                    )
+                    service = Service(path)
                     break
             
-            # Set memory limits
-            options.add_argument('--memory-pressure-off')
-            options.add_argument('--max_old_space_size=256')  # Reduce memory
+            # More memory for Pro
+            options.add_argument('--max_old_space_size=512')
             
             if service:
                 self.driver = webdriver.Chrome(service=service, options=options)
@@ -96,34 +112,46 @@ class InstagramBot:
                 self.driver = webdriver.Chrome(options=options)
             
             # Set timeouts
-            self.driver.set_page_load_timeout(30)
-            self.driver.set_script_timeout(30)
+            self.driver.set_page_load_timeout(60)
+            self.driver.set_script_timeout(60)
             
             # Hide webdriver
             self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
                 'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
             })
             
-            logger.info("ChromeDriver initialized successfully with optimized settings")
+            logger.info("ChromeDriver initialized successfully with auto-cleanup")
             
         except Exception as e:
             logger.error(f"Failed to initialize Chrome Driver: {e}")
+            self._cleanup_temp_dir()
             raise
     
+    def _cleanup_temp_dir(self):
+        """Clean up temporary Chrome profile directory"""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                logger.info(f"Cleaned up temporary Chrome profile: {self.temp_dir}")
+            except Exception as e:
+                logger.warning(f"Could not cleanup temp dir: {e}")
+            finally:
+                self.temp_dir = None
+    
     def perform_cookie_login(self, cookies):
-        """Perform cookie login with better error handling"""
+        """Perform cookie login with auto-cleanup"""
         try:
             logger.info("Attempting cookie-based login...")
             
-            # Clear any existing session
+            # Clear any existing cookies
             self.driver.delete_all_cookies()
             
-            # Step 1: Navigate to Instagram
+            # Navigate to Instagram
             logger.info("Navigating to Instagram...")
             self.driver.get("https://www.instagram.com")
-            time.sleep(2)
+            time.sleep(3)
             
-            # Step 2: Inject cookies
+            # Inject cookies (temporary, not saved)
             logger.info(f"Injecting {len(cookies)} cookies...")
             injected_count = 0
             for cookie in cookies:
@@ -136,15 +164,15 @@ class InstagramBot:
             
             logger.info(f"Successfully injected {injected_count} cookies.")
             
-            # Step 3: Reload page
+            # Reload page
             logger.info("Reloading page with injected session...")
             self.driver.refresh()
-            time.sleep(3)
+            time.sleep(5)
             
-            # Step 4: Handle One-Tap 'Continue' screen
+            # Handle One-Tap 'Continue' screen
             self._handle_continue_screen()
             
-            # Step 5: Verify login
+            # Verify login
             current_url = self.driver.current_url.lower()
             
             is_logged_in = False
@@ -161,16 +189,16 @@ class InstagramBot:
             return False
     
     def connect_to_business_suite(self):
-        """Connect to Facebook Business Suite with better error handling"""
+        """Connect to Facebook Business Suite"""
         try:
             logger.info("Navigating to Facebook Business login page...")
             self.driver.get(FB_LOGIN_URL)
-            time.sleep(2)
+            time.sleep(3)
             
             self._handle_cookies()
             
             logger.info("Looking for the 'Continue with Instagram' button...")
-            time.sleep(2)
+            time.sleep(3)
             
             # Check for redirect
             current_url = self.driver.current_url.lower()
@@ -215,7 +243,7 @@ class InstagramBot:
             
             logger.info(f"Navigating to ad booster page...")
             self.driver.get(target_url)
-            time.sleep(4)
+            time.sleep(5)
             
             return self.driver.current_url
             
@@ -270,7 +298,7 @@ class InstagramBot:
                 popup_start_time = time.time()
                 step_attempts = {}
                 
-                while time.time() - popup_start_time < 60:  # Reduced timeout
+                while time.time() - popup_start_time < 90:
                     time.sleep(1)
                     
                     if len(self.driver.window_handles) == 1:
@@ -313,7 +341,7 @@ class InstagramBot:
                         
                         if active_state:
                             step_attempts[active_state] = step_attempts.get(active_state, 0) + 1
-                            if step_attempts[active_state] > 2:
+                            if step_attempts[active_state] > 3:
                                 logger.info(f"State {active_state} is stuck. Closing...")
                                 try:
                                     self.driver.close()
@@ -349,7 +377,7 @@ class InstagramBot:
                             login_as_btn.click()
                         except:
                             self.driver.execute_script("arguments[0].click();", login_as_btn)
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     
                     # Check for authorization button
@@ -360,7 +388,7 @@ class InstagramBot:
                             auth_btn.click()
                         except:
                             self.driver.execute_script("arguments[0].click();", auth_btn)
-                        time.sleep(3)
+                        time.sleep(4)
                         continue
                     
                     if len(self.driver.window_handles) == 1:
@@ -376,7 +404,7 @@ class InstagramBot:
                             self.driver.switch_to.window(main_window)
                             logger.info("Switched back to main window.")
                             self.driver.refresh()
-                            time.sleep(3)
+                            time.sleep(5)
                     except Exception as win_err:
                         logger.error(f"Failed to switch back: {win_err}")
                         
@@ -384,7 +412,7 @@ class InstagramBot:
             logger.error(f"Error in popup handling: {e}")
     
     def _handle_professional_conversion_step(self):
-        """Handle professional conversion steps - optimized"""
+        """Handle professional conversion steps"""
         # State 5: Ready screen
         try:
             ready_elems = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'account is ready')]")
@@ -483,7 +511,7 @@ class InstagramBot:
         logger.info("Post-Login Landing Page Controller")
         controller_start = time.time()
         
-        while time.time() - controller_start < 30:  # Reduced timeout
+        while time.time() - controller_start < 60:
             time.sleep(2)
             
             try:
@@ -510,7 +538,7 @@ class InstagramBot:
                     create_ad_btn.click()
                 except:
                     self.driver.execute_script("arguments[0].click();", create_ad_btn)
-                time.sleep(3)
+                time.sleep(5)
                 return True
             
             # Check for continue buttons
@@ -521,7 +549,7 @@ class InstagramBot:
                     continue_btn.click()
                 except:
                     self.driver.execute_script("arguments[0].click();", continue_btn)
-                time.sleep(2)
+                time.sleep(3)
                 continue
         
         return False
@@ -541,7 +569,7 @@ class InstagramBot:
                     continue_btn.click()
                 except:
                     self.driver.execute_script("arguments[0].click();", continue_btn)
-                time.sleep(3)
+                time.sleep(5)
             
             # Handle Continue as button
             self._handle_continue_as_button(main_window)
@@ -549,7 +577,7 @@ class InstagramBot:
             # Refresh
             try:
                 self.driver.refresh()
-                time.sleep(5)
+                time.sleep(8)
             except:
                 pass
     
@@ -559,7 +587,7 @@ class InstagramBot:
             # Check for popup
             popup_window = None
             start_wait = time.time()
-            while time.time() - start_wait < 5:
+            while time.time() - start_wait < 10:
                 try:
                     if len(self.driver.window_handles) > 1:
                         for handle in self.driver.window_handles:
@@ -573,7 +601,7 @@ class InstagramBot:
                 time.sleep(0.5)
             
             if popup_window:
-                time.sleep(3)
+                time.sleep(5)
                 
                 # Find Continue as button
                 continue_as_btn = None
@@ -599,7 +627,7 @@ class InstagramBot:
                         continue_as_btn.click()
                     except:
                         self.driver.execute_script("arguments[0].click();", continue_as_btn)
-                    time.sleep(5)
+                    time.sleep(8)
                 
                 # Close popup
                 try:
@@ -618,7 +646,6 @@ class InstagramBot:
         except Exception as e:
             logger.error(f"Error in continue as handler: {e}")
     
-    # Helper methods
     def _sanitize_cookie(self, cookie):
         """Sanitize cookie"""
         valid_cookie = {}
@@ -741,46 +768,43 @@ class InstagramBot:
         return None
     
     def get_current_url(self):
+        """Get current URL"""
         try:
             return self.driver.current_url if self.driver else None
         except:
             return None
     
     def get_page_title(self):
+        """Get page title"""
         try:
             return self.driver.title if self.driver else None
         except:
             return None
     
     def quit(self):
-        """Clean quit with memory cleanup"""
+        """Clean quit with full memory cleanup"""
         if self.driver:
             try:
+                # Clear all cookies before quitting
+                self.driver.delete_all_cookies()
+                
+                # Close all windows
+                for handle in self.driver.window_handles:
+                    try:
+                        self.driver.switch_to.window(handle)
+                        self.driver.close()
+                    except:
+                        pass
+                
+                # Quit driver
                 self.driver.quit()
             except:
                 pass
             self.driver = None
-            gc.collect()
-def get_current_url(self):
-    """Get current URL"""
-    try:
-        return self.driver.current_url if self.driver else None
-    except:
-        return None
-
-def get_page_title(self):
-    """Get page title"""
-    try:
-        return self.driver.title if self.driver else None
-    except:
-        return None
-
-def quit(self):
-    """Clean quit with memory cleanup"""
-    if self.driver:
-        try:
-            self.driver.quit()
-        except:
-            pass
-        self.driver = None
+        
+        # Clean up temporary profile directory
+        self._cleanup_temp_dir()
+        
+        # Force garbage collection
         gc.collect()
+        logger.info("Chrome driver cleaned up and memory freed")
