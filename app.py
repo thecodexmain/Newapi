@@ -6,25 +6,20 @@ import uuid
 import time
 import logging
 import gc
+import re
 from datetime import datetime
 from instagram_bot import InstagramBot
 
-# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Store active sessions
 active_sessions = {}
-
-# ==================== ROUTES ====================
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
         'active_sessions': len(active_sessions),
@@ -33,7 +28,6 @@ def health_check():
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    """Login using cookie string - returns session_id and username"""
     try:
         data = request.json
         cookie_string = data.get('cookie_string')
@@ -41,23 +35,18 @@ def login():
         if not cookie_string:
             return jsonify({'error': 'cookie_string required'}), 400
         
-        # Parse cookies
         cookies = parse_cookie_string(cookie_string)
         
         if not cookies:
             return jsonify({'error': 'No valid cookies found'}), 400
         
-        # Create bot instance
         bot = InstagramBot(headless=True)
-        
-        # Perform cookie login
         success = bot.perform_cookie_login(cookies)
         
         if not success:
             bot.quit()
             return jsonify({'error': 'Cookie login failed - cookies may be expired'}), 401
         
-        # Create session
         session_id = str(uuid.uuid4())
         username = bot.get_username()
         
@@ -84,7 +73,6 @@ def login():
 
 @app.route('/api/connect-business', methods=['POST'])
 def connect_business():
-    """Full flow: Connect to Facebook Business Suite - matches boost script exactly"""
     try:
         data = request.json
         session_id = data.get('session_id')
@@ -100,20 +88,15 @@ def connect_business():
         
         logger.info(f"Starting Business Suite connection for session: {session_id} (Username: {username})")
         
-        # Connect to Business Suite
         result = bot.connect_to_business_suite()
         
         if result:
             active_sessions[session_id]['connected'] = True
-            
-            # Get final URL with asset_id
             current_url = bot.get_current_url()
             
-            # Extract asset_id and business_id from URL
             asset_id = None
             business_id = None
             if current_url:
-                import re
                 asset_match = re.search(r'asset_id=(\d+)', current_url)
                 if asset_match:
                     asset_id = asset_match.group(1)
@@ -144,7 +127,6 @@ def connect_business():
 
 @app.route('/api/ad-picker', methods=['POST'])
 def ad_picker():
-    """Navigate to ad picker"""
     try:
         data = request.json
         session_id = data.get('session_id')
@@ -162,8 +144,6 @@ def ad_picker():
         
         bot = active_sessions[session_id]['bot']
         username = active_sessions[session_id].get('username', 'Unknown')
-        
-        logger.info(f"Getting ad picker for session: {session_id} (Username: {username})")
         
         url = bot.navigate_to_ad_picker(asset_id, business_id)
         
@@ -186,7 +166,6 @@ def ad_picker():
 
 @app.route('/api/status', methods=['POST'])
 def status():
-    """Check session status with username"""
     try:
         data = request.json
         session_id = data.get('session_id')
@@ -216,7 +195,6 @@ def status():
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    """Logout and cleanup with full memory free"""
     try:
         data = request.json
         session_id = data.get('session_id')
@@ -225,12 +203,10 @@ def logout():
             bot = active_sessions[session_id]['bot']
             username = active_sessions[session_id].get('username', 'Unknown')
             
-            bot.quit()  # This now clears everything
+            bot.quit()
             del active_sessions[session_id]
             
             logger.info(f"Session {session_id} logged out and cleaned up (Username: {username})")
-            
-            # Force garbage collection
             gc.collect()
         
         return jsonify({'status': 'success', 'message': 'Logged out and cleaned up'})
@@ -241,7 +217,6 @@ def logout():
 
 @app.route('/api/sessions', methods=['GET'])
 def list_sessions():
-    """List all active sessions with usernames"""
     sessions_list = []
     for sid, session in active_sessions.items():
         sessions_list.append({
@@ -258,11 +233,9 @@ def list_sessions():
 
 @app.route('/api/cleanup', methods=['POST'])
 def cleanup():
-    """Force cleanup of all sessions and resources"""
     try:
         cleared_count = len(active_sessions)
         
-        # Close and clean up all sessions
         for session_id in list(active_sessions.keys()):
             try:
                 bot = active_sessions[session_id]['bot']
@@ -271,10 +244,7 @@ def cleanup():
                 pass
             del active_sessions[session_id]
         
-        # Force garbage collection
         gc.collect()
-        
-        logger.info(f"Force cleanup completed: {cleared_count} sessions cleared")
         
         return jsonify({
             'status': 'success',
@@ -298,10 +268,7 @@ def method_not_allowed(e):
 def internal_error(e):
     return jsonify({'error': 'Internal server error'}), 500
 
-# ==================== HELPER FUNCTIONS ====================
-
 def parse_cookie_string(cookie_str):
-    """Parse cookie string into list of cookie dicts"""
     cookies = []
     if not cookie_str:
         return cookies
@@ -320,8 +287,6 @@ def parse_cookie_string(cookie_str):
         })
     
     return cookies
-
-# ==================== MAIN ====================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
